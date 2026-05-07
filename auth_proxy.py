@@ -116,6 +116,12 @@ def _is_public_path(path: str) -> bool:
 
 
 class AuthProxyHandler(BaseHTTPRequestHandler):
+    # HTTP/1.1 lets us forward Transfer-Encoding: chunked from upstream
+    # untouched and supports Range responses (206) needed for video seeks.
+    # Default is HTTP/1.0 which forces a close-per-request and rejects
+    # chunked encoding.
+    protocol_version = "HTTP/1.1"
+
     upstream_host: str = "127.0.0.1"
     upstream_port: int = 8888
 
@@ -329,17 +335,27 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
             return value.encode("latin-1", errors="replace")
 
     def _proxy(self) -> None:
+        """Forward an HTTP request to the upstream and stream the response back.
+
+        We deliberately stream both directions in chunks rather than buffer
+        the body — large media / API responses would otherwise OOM the proxy
+        or trip a body-size cap and 502 the request.
+        """
         cleaned_headers = _strip_headers(
             self.headers.items(),
             HOP_BY_HOP_HEADERS | ALWAYS_STRIP_HEADERS,
         )
 
-        transfer_encoding = self.headers.get("Transfer-Encoding", "").lower().strip()
-        if transfer_encoding and transfer_encoding != "identity":
-            self._safe_send_error(501, "Transfer-Encoding not supported")
+        # Forward request body if present.  We still cap *requests* at
+        # MAX_BODY_BYTES because legitimate UI POSTs are tiny and buffering
+        # them keeps the client→upstream side simple; uploads larger than
+        # this should use a different code path.
+        body: bytes | None = None
+        client_te = self.headers.get("Transfer-Encoding", "").lower().strip()
+        if client_te and client_te != "identity":
+            self._safe_send_error(501, "Transfer-Encoding not supported on requests")
             return
 
-        body: bytes | None = None
         content_length_header = self.headers.get("Content-Length")
         if content_length_header:
             try:
@@ -368,8 +384,9 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
         elif self.command in ("POST", "PUT", "PATCH", "DELETE"):
             body = b""
 
+        # Long timeout so multi-GiB streams aren't capped at 120s.
         conn = http.client.HTTPConnection(
-            self.upstream_host, self.upstream_port, timeout=120
+            self.upstream_host, self.upstream_port, timeout=STREAM_TIMEOUT_SECONDS
         )
         try:
             try:
@@ -390,24 +407,12 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
                 self._safe_send_error(502, "Bad Gateway")
                 return
 
-            try:
-                payload = upstream.read(MAX_BODY_BYTES + 1)
-            except (OSError, http.client.HTTPException) as exc:
-                log.warning("upstream read error: %s", exc)
-                self._safe_send_error(502, "Bad Gateway")
-                try:
-                    upstream.close()
-                except Exception as close_exc:  # noqa: BLE001
-                    log.debug("upstream.close() raised: %s", close_exc)
-                return
-            try:
-                upstream.close()
-            except Exception as exc:  # noqa: BLE001
-                log.debug("upstream.close() raised (ignored): %s", exc)
-            if len(payload) > MAX_BODY_BYTES:
-                self._safe_send_error(502, "upstream response too large")
-                return
-
+            # ---- Send response headers immediately, before reading body. ----
+            #
+            # The response body is streamed below.  We forward upstream's
+            # Content-Length / Transfer-Encoding so the client knows how to
+            # frame the response (fixed-length vs. chunked) and Range
+            # responses (206 with ``Content-Range``) work for video seeking.
             reason = upstream.reason or ""
             try:
                 self.send_response(upstream.status, reason)
@@ -415,11 +420,40 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
                     if key.lower() in HOP_BY_HOP_HEADERS:
                         continue
                     self.send_header(key, value)
+                # Force one-and-done so we don't have to manage HTTP/1.1
+                # keep-alive state between requests on the same TCP
+                # connection.  Browsers / Caddy / OpenHost's outer router
+                # handle close-per-request fine.
+                self.send_header("Connection", "close")
+                self.close_connection = True
                 self.end_headers()
-                if self.command != "HEAD":
-                    self.wfile.write(payload)
             except OSError as exc:
-                log.debug("client disconnected mid-response: %s", exc)
+                log.debug("client disconnected during response head: %s", exc)
+                upstream.close()
+                return
+
+            # ---- Stream body in chunks. ----
+            if self.command != "HEAD":
+                try:
+                    while True:
+                        chunk = upstream.read(STREAM_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        try:
+                            self.wfile.write(chunk)
+                        except OSError as exc:
+                            log.debug(
+                                "client disconnected mid-stream after %d bytes: %s",
+                                len(chunk), exc,
+                            )
+                            return
+                except (OSError, http.client.HTTPException) as exc:
+                    log.warning("upstream read error mid-stream: %s", exc)
+                    return
+            try:
+                upstream.close()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("upstream.close() raised (ignored): %s", exc)
         finally:
             conn.close()
 
