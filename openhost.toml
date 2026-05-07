@@ -1,0 +1,48 @@
+[app]
+name = "atuin"
+version = "0.1.0"
+description = "Atuin shell history sync server packaged for OpenHost. The zone owner registers their atuin client once via the OpenHost-gated /register endpoint, then the CLI sync uses Atuin's own bearer-token auth. New account registration is gated to the zone owner; existing CLI clients sync directly with their own tokens."
+authors = ["Andrew Laack <andrew@laack.co>"]
+
+[runtime.container]
+image = "Dockerfile"
+# Auth-proxy port. atuin-server runs on 127.0.0.1:8888 inside the
+# container; the proxy listens on 8080 and is what the OpenHost
+# router forwards to.
+port = 8080
+
+[routing]
+# Atuin's /healthz returns 200 + "OK" without auth.
+health_check = "/healthz"
+# Atuin CLI clients authenticate with their own `Authorization: Token`
+# header.  Listing every CLI-consumed path here means the OpenHost
+# router doesn't 302 those requests to its own login page; the
+# auth-proxy then forwards them to atuin-server which validates the
+# bearer token.
+#
+# /register is deliberately NOT in this list — only the zone owner,
+# routed through OpenHost's owner-required gate, can reach it.  This
+# is how we keep the server effectively single-tenant while still
+# allowing the CLI sync.
+public_paths = [
+    "/healthz",
+    "/login",
+    "/sync/",
+    "/history",
+    "/record",
+    "/api/",
+    "/user/",
+    "/account",
+]
+
+[resources]
+# atuin-server is a single Rust binary backed by sqlite; trivial in
+# 256 MiB.  Bumped to 512 to leave headroom.
+memory_mb = 512
+cpu_millicores = 500
+
+[data]
+# Persistent state under /data/app_data/atuin/:
+#   * server.toml — generated atuin-server config
+#   * atuin.db    — sqlite database (history, users, sessions)
+app_data = true
