@@ -1,16 +1,16 @@
-# openhost-atuin
+# bottled-atuin
 
-[Atuin](https://atuin.sh) shell-history sync server packaged as an OpenHost
-app. The zone owner registers their atuin client once via the OpenHost-gated
+[Atuin](https://atuin.sh) shell-history sync server packaged as a Cloud in a Bottle
+app. The zone owner registers their atuin client once via the Cloud in a Bottle-gated
 `/register` endpoint, then the CLI sync uses Atuin's own bearer-token auth
 directly.
 
 ## What you get
 
 - atuin-server running on `https://atuin.<zone>/` with TLS terminated by the
-  OpenHost outer Caddy.
+  Cloud in a Bottle outer Caddy.
 - Only the zone owner can register a new account on this server (the
-  OpenHost router gates `/register` on a verified owner JWT).
+  Cloud in a Bottle router gates `/register` on a verified owner JWT).
 - All CLI sync paths (`/sync`, `/history`, `/record`, `/api/v0`, etc.) are
   exposed publicly so the CLI can authenticate with its own
   `Authorization: Token <token>` header.
@@ -33,7 +33,7 @@ atuin register \
   --password <your-password>
 ```
 
-   Atuin's CLI will hit `https://atuin.<zone>/register` and the OpenHost
+   Atuin's CLI will hit `https://atuin.<zone>/register` and the Cloud in a Bottle
    router will check that you're the zone owner before letting it through.
 3. The CLI saves a session token under `~/.local/share/atuin/session`. From
    then on, sync just works:
@@ -80,10 +80,10 @@ container :8080  ── auth_proxy.py ──────────────
 
 | File              | Purpose                                                     |
 | ----------------- | ----------------------------------------------------------- |
-| `openhost.toml`   | OpenHost manifest (lists CLI paths as public)               |
+| `openhost.toml`   | Cloud in a Bottle manifest (lists CLI paths as public)               |
 | `Dockerfile`      | debian:bookworm-slim + downloaded atuin-server prebuilt     |
 | `start.sh`        | Renders server.toml, boots atuin-server + auth-proxy        |
-| `auth_proxy.py`   | OpenHost owner-gate sidecar                                 |
+| `auth_proxy.py`   | Cloud in a Bottle owner-gate sidecar                                 |
 
 ## Locking down further
 
@@ -91,4 +91,4 @@ If you want even fewer endpoints reachable from the public internet (e.g.
 your shells are all on Tailscale and you're paranoid about CLI endpoints
 being scanned), tighten `public_paths` in `openhost.toml` to just `/healthz`
 and reach Atuin from your shells via the Tailscale or zerotier IP of your
-OpenHost host.
+Cloud in a Bottle host.
