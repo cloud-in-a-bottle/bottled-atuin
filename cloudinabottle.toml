@@ -1,7 +1,7 @@
 [app]
 name = "atuin"
 version = "0.1.0"
-description = "Atuin shell history sync server packaged for Cloud in a Bottle. The zone owner registers their atuin client once via the Cloud in a Bottle-gated /register endpoint, then the CLI sync uses Atuin's own bearer-token auth. New account registration is gated to the zone owner; existing CLI clients sync directly with their own tokens."
+description = "Atuin shell history sync server packaged for Cloud in a Bottle. The zone owner creates an account from the owner-only /setup page, then each device logs in with the atuin CLI and syncs using Atuin's own token auth."
 authors = ["Andrew Laack <andrew@laack.co>"]
 
 [runtime.container]
@@ -20,10 +20,10 @@ health_check = "/healthz"
 # auth-proxy then forwards them to atuin-server which validates the
 # bearer token.
 #
-# /register is deliberately NOT in this list — only the zone owner,
-# routed through OpenHost's owner-required gate, can reach it.  This
-# is how we keep the server effectively single-tenant while still
-# allowing the CLI sync.
+# /register and /setup are deliberately NOT in this list — only the
+# zone owner, routed through the router's owner-required gate, can
+# reach them.  This is how we keep the server effectively
+# single-tenant while still allowing the CLI sync.
 public_paths = [
     "/healthz",
     "/login",
@@ -35,11 +35,18 @@ public_paths = [
     "/account",
 ]
 
+# Owner-only account-creation page served by auth_proxy.py.  The atuin
+# CLI can't pass the owner gate on /register, so accounts are created
+# here from a browser.
+[[links]]
+name = "Create account"
+path = "/setup"
+
 [resources]
 # atuin-server is a single Rust binary backed by sqlite; trivial in
 # 256 MiB.  Bumped to 512 to leave headroom.
 memory_mb = 512
-cpu_millicores = 500
+cpu_cores = 0.5
 
 [data]
 # Persistent state under /data/app_data/atuin/:
