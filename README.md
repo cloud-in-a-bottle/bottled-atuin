@@ -59,11 +59,11 @@ history cannot be decrypted.
 browser / CLI
    │
    ▼
-OpenHost outer Caddy (TLS)
+Cloud in a Bottle outer Caddy (TLS)
    │
    ▼
-OpenHost router (only stamps X-OpenHost-Is-Owner: true on owner JWTs;
-                  allows public_paths through unauthenticated)
+Cloud in a Bottle router (only stamps X-OpenHost-Is-Owner: true for the
+                           owner; allows public_paths through unauthenticated)
    │
    ▼
 container :8080  ── auth_proxy.py ─────────────────┐

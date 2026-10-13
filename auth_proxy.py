@@ -427,6 +427,7 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
                 },
             )
             resp = conn.getresponse()
+            status = resp.status
             body = resp.read(64 * 1024)
         except (OSError, http.client.HTTPException) as exc:
             log.warning("setup: upstream register error: %s", exc)
@@ -434,13 +435,14 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
         finally:
             conn.close()
 
-        if resp.status == 200:
+        if status == 200:
             return 200, ""
         try:
             reason = str(json.loads(body).get("reason") or "")
         except (ValueError, AttributeError):
+            log.debug("setup: unparseable upstream error body: %r", body[:200])
             reason = ""
-        return resp.status, reason or f"atuin-server returned HTTP {resp.status}"
+        return status, reason or f"atuin-server returned HTTP {status}"
 
     def _is_websocket_upgrade(self) -> bool:
         upgrade = self.headers.get("Upgrade", "").lower().strip()
