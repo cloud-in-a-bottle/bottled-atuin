@@ -7,8 +7,9 @@ can't intermediate that, so we list every CLI-consumed path as
 ``public`` in cloudinabottle.toml.
 
 Only the zone owner can register a new account on this Atuin
-server; that is what keeps it effectively single-tenant.  The
-non-public paths the proxy gates are /register and /setup.
+server; that is what keeps it effectively single-tenant.  Neither
+/register (proxied upstream) nor /setup (served by this proxy) is a
+public path, so both require the owner.
 
 The atuin CLI can't send Cloud in a Bottle credentials, so
 ``atuin register`` can never pass the gate.  Instead the proxy serves
@@ -332,11 +333,12 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
             self._safe_send_error(403, "cross-origin request rejected")
             return
         origin = self.headers.get("Origin")
-        if origin is not None and origin != self._public_origin():
+        expected_origin = self._public_origin()
+        if origin is not None and origin != expected_origin:
             log.info(
                 "setup: rejecting POST with Origin %r (expected %r)",
                 origin,
-                self._public_origin(),
+                expected_origin,
             )
             self._safe_send_error(403, "cross-origin request rejected")
             return
@@ -345,13 +347,18 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
         if content_type.split(";", 1)[0].strip().lower() != "application/x-www-form-urlencoded":
             self._safe_send_error(415, "expected application/x-www-form-urlencoded")
             return
-        if self.headers.get("Transfer-Encoding"):
+        client_te = self.headers.get("Transfer-Encoding", "").lower().strip()
+        if client_te and client_te != "identity":
             self._safe_send_error(501, "Transfer-Encoding not supported on requests")
             return
-        try:
-            length = int(self.headers.get("Content-Length", ""))
-        except ValueError:
+        content_length_header = self.headers.get("Content-Length")
+        if content_length_header is None:
             self._safe_send_error(411, "Content-Length required")
+            return
+        try:
+            length = int(content_length_header)
+        except ValueError:
+            self._safe_send_error(400, "invalid Content-Length")
             return
         if length < 0 or length > SETUP_MAX_FORM_BYTES:
             self._safe_send_error(413, "request body too large")
