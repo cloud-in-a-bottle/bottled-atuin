@@ -10,6 +10,13 @@ The one path the proxy *does* gate is /register: only the zone
 owner can register a new account on this Atuin server.  This is
 what keeps the server effectively single-tenant.
 
+The atuin CLI can't send Cloud in a Bottle credentials, so
+``atuin register`` can never pass the gate.  Instead the proxy serves
+an owner-only ``/setup`` page: the owner opens it in a browser (the
+router authenticates them with their session cookie), submits a form,
+and the proxy calls atuin-server's /register on their behalf.  The
+CLI then uses the public ``/login`` endpoint.
+
 Auth model:
 
   * Owner (X-OpenHost-Is-Owner: true)         → forward unchanged
@@ -36,12 +43,15 @@ Adapted from openhost-pinchflat/auth_proxy.py.
 
 from __future__ import annotations
 
+import html
 import http.client
+import json
 import logging
 import os
 import selectors
 import socket
 import sys
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import AbstractSet, Iterable
 
@@ -68,8 +78,9 @@ ALWAYS_STRIP_HEADERS = frozenset(
     h.lower() for h in (OWNER_HEADER_NAME, USER_HEADER_NAME)
 )
 
-# Paths that podcast/RSS clients use without SSO; each contains a
-# UUID acting as its own auth token.  Match by prefix.
+# Paths the atuin CLI uses with its own ``Authorization: Token``
+# header (or, for /login, username + password).  Must stay in sync
+# with public_paths in cloudinabottle.toml.  Match by prefix.
 PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/healthz",  # OpenHost router liveness probe
     "/login",
@@ -94,6 +105,75 @@ MAX_BODY_BYTES = 100 * 1024 * 1024
 STREAM_CHUNK_BYTES = 64 * 1024
 STREAM_TIMEOUT_SECONDS = 6 * 60 * 60
 HEADER_LINE_CAP = 64 * 1024
+
+# Owner-only account-creation page.  NOT a public path, so the router
+# only forwards it with a verified owner identity.
+SETUP_PATH = "/setup"
+SETUP_MAX_FORM_BYTES = 16 * 1024
+SETUP_UPSTREAM_TIMEOUT_SECONDS = 30
+
+_PAGE_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atuin setup</title>
+<style>
+body {{ font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }}
+label {{ display: block; margin-top: 1rem; font-weight: 600; }}
+input {{ width: 100%; padding: .5rem; font-size: 1rem; box-sizing: border-box; }}
+button {{ margin-top: 1.5rem; padding: .6rem 1.2rem; font-size: 1rem; }}
+pre {{ background: #f3f3f3; padding: .75rem; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }}
+.error {{ color: #a00; font-weight: 600; }}
+</style>
+</head>
+<body>
+<h1>Atuin sync server</h1>
+{body}
+</body>
+</html>
+"""
+
+_FORM_TEMPLATE = """
+<p>Create an account on this server. Only the owner of this Cloud in a
+Bottle instance can see this page. <code>atuin register</code> from the
+CLI does not work here, because the CLI cannot send Cloud in a Bottle
+credentials.</p>
+{error}
+<form method="post" action="{action}">
+<label for="username">Username</label>
+<input id="username" name="username" required autocomplete="username" value="{username}">
+<label for="email">Email</label>
+<input id="email" name="email" type="email" required autocomplete="email" value="{email}">
+<label for="password">Password</label>
+<input id="password" name="password" type="password" required autocomplete="new-password">
+<button type="submit">Create account</button>
+</form>
+<h2>Already have an account?</h2>
+{client_instructions}
+"""
+
+_SUCCESS_TEMPLATE = """
+<p>Account <strong>{username}</strong> created.</p>
+{client_instructions}
+"""
+
+_CLIENT_INSTRUCTIONS_TEMPLATE = """
+<p>Point each machine at this server in <code>~/.config/atuin/config.toml</code>:</p>
+<pre>sync_address = "{server_url}"</pre>
+<p>On your <strong>first</strong> machine, generate an encryption key, back it
+up somewhere safe, then log in (press Enter at the key prompt to use the key
+you just generated):</p>
+<pre>atuin key
+atuin login -u {username}
+atuin sync</pre>
+<p>On every <strong>other</strong> machine, log in with the same key
+(<code>atuin key</code> on the first machine prints it):</p>
+<pre>atuin login -u {username} -k "&lt;your key&gt;"
+atuin sync</pre>
+<p>The key never leaves your machines. If you lose it, your synced history
+cannot be decrypted.</p>
+"""
 
 logging.basicConfig(
     level=os.environ.get("AUTH_PROXY_LOG_LEVEL", "INFO"),
@@ -169,11 +249,173 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
             self._safe_send_error(403, "OpenHost owner required")
             return
 
+        if self.path.split("?", 1)[0].rstrip("/") == SETUP_PATH:
+            # Only reachable here as owner: SETUP_PATH is not public.
+            self._handle_setup()
+            return
+
         if self._is_websocket_upgrade():
             self._proxy_websocket()
             return
 
         self._proxy()
+
+    # ------------------------------------------------------------------
+    # Owner-only /setup page
+    # ------------------------------------------------------------------
+
+    def _public_origin(self) -> str:
+        proto = self.headers.get("X-Forwarded-Proto", "").strip() or "https"
+        host = (
+            self.headers.get("X-Forwarded-Host", "").strip()
+            or self.headers.get("Host", "").strip()
+        )
+        return f"{proto}://{host}"
+
+    def _send_html(self, status: int, body: str) -> None:
+        payload = _PAGE_TEMPLATE.format(body=body).encode("utf-8")
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'none'; style-src 'unsafe-inline'; "
+                "form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+            )
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Connection", "close")
+            self.close_connection = True
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(payload)
+        except OSError as exc:
+            log.debug("client disconnected during setup response: %s", exc)
+
+    def _client_instructions(self, username: str) -> str:
+        return _CLIENT_INSTRUCTIONS_TEMPLATE.format(
+            server_url=html.escape(self._public_origin()),
+            username=html.escape(username or "<username>"),
+        )
+
+    def _render_form(
+        self, status: int, error: str = "", username: str = "", email: str = ""
+    ) -> None:
+        body = _FORM_TEMPLATE.format(
+            action=SETUP_PATH,
+            error=f'<p class="error">{html.escape(error)}</p>' if error else "",
+            username=html.escape(username, quote=True),
+            email=html.escape(email, quote=True),
+            client_instructions=self._client_instructions(""),
+        )
+        self._send_html(status, body)
+
+    def _handle_setup(self) -> None:
+        if self.command in ("GET", "HEAD"):
+            self._render_form(200)
+            return
+        if self.command != "POST":
+            self._safe_send_error(405, "Method Not Allowed")
+            return
+
+        # The router already rejects cross-origin cookie-authenticated
+        # requests; re-check here as defense in depth against CSRF.
+        origin = self.headers.get("Origin")
+        if origin is not None and origin != self._public_origin():
+            self._safe_send_error(403, "cross-origin request rejected")
+            return
+
+        if self.headers.get("Transfer-Encoding"):
+            self._safe_send_error(501, "Transfer-Encoding not supported on requests")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            self._safe_send_error(411, "Content-Length required")
+            return
+        if length < 0 or length > SETUP_MAX_FORM_BYTES:
+            self._safe_send_error(413, "request body too large")
+            return
+        try:
+            raw = self.rfile.read(length)
+        except (OSError, TimeoutError) as exc:
+            log.info("setup form read error: %s", exc)
+            self._safe_send_error(400, "request body read failed")
+            return
+        if len(raw) != length:
+            self._safe_send_error(400, "incomplete request body")
+            return
+
+        form = urllib.parse.parse_qs(
+            raw.decode("utf-8", errors="replace"), keep_blank_values=True
+        )
+        username = form.get("username", [""])[0].strip()
+        email = form.get("email", [""])[0].strip()
+        password = form.get("password", [""])[0]
+        if not username or not email or not password:
+            self._render_form(
+                400, "Username, email and password are all required.", username, email
+            )
+            return
+
+        status, reason = self._register_upstream(username, email, password)
+        if status == 200:
+            log.info("setup: registered atuin account %r", username)
+            self._send_html(
+                200,
+                _SUCCESS_TEMPLATE.format(
+                    username=html.escape(username),
+                    client_instructions=self._client_instructions(username),
+                ),
+            )
+            return
+        log.info("setup: registration of %r failed (%s): %s", username, status, reason)
+        self._render_form(
+            400 if 400 <= status < 500 else 502,
+            f"Registration failed: {reason}",
+            username,
+            email,
+        )
+
+    def _register_upstream(
+        self, username: str, email: str, password: str
+    ) -> tuple[int, str]:
+        """POST to atuin-server's /register.  Returns (status, reason)."""
+        payload = json.dumps(
+            {"username": username, "email": email, "password": password}
+        ).encode("utf-8")
+        conn = http.client.HTTPConnection(
+            self.upstream_host,
+            self.upstream_port,
+            timeout=SETUP_UPSTREAM_TIMEOUT_SECONDS,
+        )
+        try:
+            conn.request(
+                "POST",
+                "/register",
+                body=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "bottled-atuin-setup",
+                },
+            )
+            resp = conn.getresponse()
+            body = resp.read(64 * 1024)
+        except (OSError, http.client.HTTPException) as exc:
+            log.warning("setup: upstream register error: %s", exc)
+            return 502, "could not reach atuin-server"
+        finally:
+            conn.close()
+
+        if resp.status == 200:
+            return 200, ""
+        try:
+            reason = str(json.loads(body).get("reason") or "")
+        except (ValueError, AttributeError):
+            reason = ""
+        return resp.status, reason or f"atuin-server returned HTTP {resp.status}"
 
     def _is_websocket_upgrade(self) -> bool:
         upgrade = self.headers.get("Upgrade", "").lower().strip()
