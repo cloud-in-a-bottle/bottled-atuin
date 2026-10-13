@@ -3,23 +3,23 @@
 #
 # Topology:
 #
-#   browser/CLI → OpenHost outer Caddy (TLS termination)
-#              → OpenHost router (subdomain atuin.<zone>)
+#   browser/CLI → Cloud in a Bottle outer Caddy (TLS termination)
+#              → Cloud in a Bottle router (subdomain atuin.<zone>)
 #              → container :8080  (auth_proxy.py — owner-gate sidecar
-#                                  for /register; pass-through for
-#                                  CLI traffic)
+#                                  for /register and the owner-only
+#                                  /setup page; pass-through for CLI
+#                                  traffic)
 #              → 127.0.0.1:8888   (atuin-server)
 #
-# Atuin clients use the same hostname as a browser would: when a
-# user runs `atuin login --username ... --password ... --key ...
-# --server-url https://atuin.<zone>` the client speaks HTTPS to
-# the OpenHost outer Caddy and uses its own bearer-token auth
-# (stored client-side after register/login).
+# Atuin clients set `sync_address = "https://atuin.<zone>"` in
+# ~/.config/atuin/config.toml and use Atuin's own token auth, which
+# the CLI stores after `atuin login`.
 #
-# Registration is gated to the zone owner: /register is NOT in
-# cloudinabottle.toml's public_paths list, so only the zone owner can
-# reach it.  Once the owner has registered their own atuin
-# account, they have a token they can use from any device.
+# Registration is gated to the zone owner: /register and /setup are
+# NOT in cloudinabottle.toml's public_paths list, so only the zone
+# owner can reach them.  The CLI can't send owner credentials, so
+# the owner creates their account from a browser at /setup, then
+# runs `atuin login` on each device.
 
 set -euo pipefail
 

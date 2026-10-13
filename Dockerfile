@@ -8,8 +8,10 @@
 #
 # Auth flow:
 #
-#   * /register   → only reachable by the zone owner (the OpenHost
-#                   router gates non-public paths on owner JWT).
+#   * /register,  → only reachable by the zone owner (the router
+#     /setup        gates non-public paths on owner auth).  /setup
+#                   is an owner-only browser form, served by the
+#                   proxy, that calls atuin-server's /register.
 #                   This is how we keep the server single-tenant.
 #   * everything  → CLI clients (atuin) hit these with their own
 #     else          `Authorization: Token <token>` header.  The

@@ -310,7 +310,7 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
             error=f'<p class="error">{html.escape(error)}</p>' if error else "",
             username=html.escape(username, quote=True),
             email=html.escape(email, quote=True),
-            client_instructions=self._client_instructions(""),
+            client_instructions=self._client_instructions(username),
         )
         self._send_html(status, body)
 
@@ -341,6 +341,10 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
             self._safe_send_error(403, "cross-origin request rejected")
             return
 
+        content_type = self.headers.get("Content-Type", "")
+        if content_type.split(";", 1)[0].strip().lower() != "application/x-www-form-urlencoded":
+            self._safe_send_error(415, "expected application/x-www-form-urlencoded")
+            return
         if self.headers.get("Transfer-Encoding"):
             self._safe_send_error(501, "Transfer-Encoding not supported on requests")
             return
