@@ -17,7 +17,7 @@
 # (stored client-side after register/login).
 #
 # Registration is gated to the zone owner: /register is NOT in
-# openhost.toml's public_paths list, so only the zone owner can
+# cloudinabottle.toml's public_paths list, so only the zone owner can
 # reach it.  Once the owner has registered their own atuin
 # account, they have a token they can use from any device.
 
@@ -29,7 +29,7 @@ CONFIG_PATH="$PERSIST/server.toml"
 
 mkdir -p "$PERSIST"
 
-# Render server config on each boot so changes to openhost.toml take
+# Render server config on each boot so changes to cloudinabottle.toml take
 # effect when the app reloads.
 cat > "$CONFIG_PATH" <<EOF
 host = "127.0.0.1"

@@ -4,11 +4,11 @@ Sits between the OpenHost router and atuin-server.  Atuin's own
 authentication model uses ``Authorization: Token <token>`` headers
 that the CLI client sets after registering — the OpenHost router
 can't intermediate that, so we list every CLI-consumed path as
-``public`` in openhost.toml.
+``public`` in cloudinabottle.toml.
 
-The one path the proxy *does* gate is /register: only the zone
-owner can register a new account on this Atuin server.  This is
-what keeps the server effectively single-tenant.
+Only the zone owner can register a new account on this Atuin
+server; that is what keeps it effectively single-tenant.  The
+non-public paths the proxy gates are /register and /setup.
 
 The atuin CLI can't send Cloud in a Bottle credentials, so
 ``atuin register`` can never pass the gate.  Instead the proxy serves
@@ -324,6 +324,13 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
 
         # The router already rejects cross-origin cookie-authenticated
         # requests; re-check here as defense in depth against CSRF.
+        # Browsers send Sec-Fetch-Site on every request, including the
+        # rare cases where they omit Origin.
+        fetch_site = self.headers.get("Sec-Fetch-Site")
+        if fetch_site is not None and fetch_site not in ("same-origin", "none"):
+            log.info("setup: rejecting POST with Sec-Fetch-Site %r", fetch_site)
+            self._safe_send_error(403, "cross-origin request rejected")
+            return
         origin = self.headers.get("Origin")
         if origin is not None and origin != self._public_origin():
             log.info(
