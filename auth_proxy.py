@@ -285,7 +285,9 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
                 "form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
             )
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Referrer-Policy", "no-referrer")
+            # Not "no-referrer": that makes browsers send "Origin: null" on
+            # the form POST, which the Origin check below would reject.
+            self.send_header("Referrer-Policy", "same-origin")
             self.send_header("Connection", "close")
             self.close_connection = True
             self.end_headers()
@@ -324,6 +326,11 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
         # requests; re-check here as defense in depth against CSRF.
         origin = self.headers.get("Origin")
         if origin is not None and origin != self._public_origin():
+            log.info(
+                "setup: rejecting POST with Origin %r (expected %r)",
+                origin,
+                self._public_origin(),
+            )
             self._safe_send_error(403, "cross-origin request rejected")
             return
 
